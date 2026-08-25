@@ -213,31 +213,146 @@ def test_cpus_per_task_emitted(stub_system, monkeypatch):
     assert "--cpus-per-task=8" in cmd
 
 
-def test_cpus_per_task_step_gets_exact_footprint_not_overlap(
-    stub_system, monkeypatch
-):
-    # With an explicit CPU footprint, srun's --cpus-per-task (which implies
-    # --exact) lets Slurm pack disjoint concurrent steps side by side, so
-    # --overlap must not be added: overlapping would put the steps on the
-    # same CPUs instead of next to each other.
+def test_cpus_per_task_step_gets_exact_not_overlap(stub_system, monkeypatch):
+    # With an explicit CPU footprint, --exact confines the step to exactly
+    # what it asked for, so Slurm packs disjoint concurrent steps side by
+    # side. --overlap must not be added: overlapping would put the steps on
+    # the same CPUs instead of next to each other. --exact alone is not
+    # enough for concurrency: a step with no --mem implicitly consumes ALL
+    # of the job's memory (--mem=0 shares it), and a CPU-only step with no
+    # GRES request implicitly holds all of the job's GPUs (--gres=none
+    # releases them).
     _set_slurm_alloc_env(monkeypatch, nodes=4)
     scheduler = SlurmScheduler(
         nodes=2, procs_per_node=1, gpus_per_proc=0, cpus_per_task=8
     )
     cmd = scheduler.launch_command(stub_system, blocking=True)
     assert "--cpus-per-task=8" in cmd
+    assert "--exact" in cmd
+    assert "--mem=0" in cmd
+    assert "--gres=none" in cmd
     assert "--overlap" not in cmd
 
 
-def test_exclusive_step_suppresses_overlap(stub_system, monkeypatch):
-    # An explicitly exclusive step asks for dedicated resources, which
-    # --overlap would contradict.
+def test_gpu_step_gets_exact_not_overlap(stub_system, monkeypatch):
+    # A per-task GPU count is also a stated footprint: --exact packs
+    # concurrent GPU steps onto disjoint resources. The GPU request itself
+    # already bounds the step's GRES, so no --gres=none here -- but memory
+    # must still be shared via --mem=0.
+    _set_slurm_alloc_env(monkeypatch, nodes=4)
+    scheduler = SlurmScheduler(nodes=2, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(stub_system, blocking=True)
+    assert "--gpus-per-task=1" in cmd
+    assert "--exact" in cmd
+    assert "--mem=0" in cmd
+    assert "--gres=none" not in cmd
+    assert "--overlap" not in cmd
+
+
+def test_exact_only_inside_allocation(stub_system, monkeypatch):
+    # Outside an allocation there are no sibling steps to pack against.
+    _clear_alloc_env(monkeypatch)
+    scheduler = SlurmScheduler(
+        nodes=2, procs_per_node=1, gpus_per_proc=1, cpus_per_task=8
+    )
+    cmd = scheduler.launch_command(stub_system, blocking=True)
+    assert "--exact" not in cmd
+    assert "--overlap" not in cmd
+    assert "--mem=0" not in cmd
+    assert "--gres=none" not in cmd
+
+
+def test_elcap_exclusive_not_applied_to_nested_flux_jobs(monkeypatch):
+    # On the El Capitan family, customize_scheduler adds --exclusive to
+    # every flux command. Inside an existing allocation (FLUX_URI set) that
+    # makes each nested `flux run` demand exclusive use of the node, so
+    # concurrent launches serialize instead of packing side by side. The
+    # flag must only be applied when the launch creates its own allocation.
+    from hpc_launcher.schedulers.flux import FluxScheduler
+    from hpc_launcher.systems.lc.el_capitan_family import ElCapitan
+
+    system = ElCapitan("tuolumne")
+
+    _clear_alloc_env(monkeypatch)
+    monkeypatch.setenv("FLUX_URI", "local:///run/flux/local")
+    scheduler = FluxScheduler(nodes=1, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert "--exclusive" not in cmd, cmd
+
+    _clear_alloc_env(monkeypatch)
+    scheduler = FluxScheduler(nodes=1, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert "--exclusive" in cmd, cmd
+
+
+def test_elcap_nested_flux_jobs_use_flux_affinity_not_mpibind(monkeypatch):
+    # mpibind assigns GPUs by the NUMA locality of a task's cores, not by
+    # the GPU set Flux granted the job, so two concurrent nested jobs on
+    # one node can be handed the same GPU. Nested jobs must therefore use
+    # Flux's own affinity plugins (mpibind off); a launch that creates its
+    # own (whole-node, single-GPU-per-task) allocation keeps mpibind.
+    from hpc_launcher.schedulers.flux import FluxScheduler
+    from hpc_launcher.systems.lc.el_capitan_family import ElCapitan
+
+    system = ElCapitan("tuolumne")
+
+    _clear_alloc_env(monkeypatch)
+    monkeypatch.setenv("FLUX_URI", "local:///run/flux/local")
+    scheduler = FluxScheduler(nodes=1, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert "-ompibind=off" in cmd, cmd
+    assert "-ogpu-affinity=per-task" in cmd, cmd
+    assert "-ocpu-affinity=per-task" in cmd, cmd
+
+    _clear_alloc_env(monkeypatch)
+    scheduler = FluxScheduler(nodes=1, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert "-ompibind=omp_proc_bind,omp_places" in cmd, cmd
+    assert not any(c.startswith("-ogpu-affinity") for c in cmd), cmd
+
+    # Multi-GPU tasks need Flux affinity even in a fresh allocation:
+    # mpibind's one-GPU-per-domain mapping cannot satisfy them.
+    scheduler = FluxScheduler(nodes=1, procs_per_node=1, gpus_per_proc=2)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert "-ompibind=off" in cmd, cmd
+    assert "-ogpu-affinity=per-task" in cmd, cmd
+
+
+def test_matrix_binding_flags_not_applied_to_nested_steps(monkeypatch):
+    # On matrix, customize_scheduler adds --mpibind=off and --gpu-bind=none.
+    # Those two flags disable exactly the two mechanisms that export
+    # per-task CUDA_VISIBLE_DEVICES into a job step (the mpibind SPANK
+    # plugin and Slurm's own GPU binding), so a nested step would run with
+    # the variable silently unset. They must only be applied when the
+    # launch creates its own allocation.
+    from hpc_launcher.systems.lc.cts2 import CTS2
+
+    system = CTS2("matrix")
+
+    _set_slurm_alloc_env(monkeypatch, nodes=1)
+    scheduler = SlurmScheduler(nodes=1, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert not any(c.startswith("--mpibind") for c in cmd), cmd
+    assert not any(c.startswith("--gpu-bind") for c in cmd), cmd
+
+    _clear_alloc_env(monkeypatch)
+    scheduler = SlurmScheduler(nodes=1, procs_per_node=1, gpus_per_proc=1)
+    cmd = scheduler.launch_command(system, blocking=True)
+    assert "--mpibind=off" in cmd, cmd
+    assert "--gpu-bind=none" in cmd, cmd
+
+
+def test_exclusive_step_suppresses_overlap_and_exact(stub_system, monkeypatch):
+    # An explicitly exclusive step asks for dedicated resources, which both
+    # --overlap and --exact would undermine.
     _set_slurm_alloc_env(monkeypatch, nodes=4)
     scheduler = SlurmScheduler(
-        nodes=2, procs_per_node=1, gpus_per_proc=0, exclusive=True
+        nodes=2, procs_per_node=1, gpus_per_proc=0, cpus_per_task=8,
+        exclusive=True,
     )
     cmd = scheduler.launch_command(stub_system, blocking=True)
     assert "--overlap" not in cmd
+    assert "--exact" not in cmd
     assert any(c.startswith("--exclusive") for c in cmd)
 
 

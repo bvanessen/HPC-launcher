@@ -66,8 +66,16 @@ class CTS2(System):
 
     def customize_scheduler(self, scheduler):
         if self.system_name == "matrix" and type(scheduler) is SlurmScheduler:
-            scheduler.run_only_args["--mpibind"] = "off"
-            scheduler.run_only_args["--gpu-bind"] = "none"
+            # Not for a nested job step (srun inside an existing
+            # allocation): these two flags disable exactly the two
+            # mechanisms that export per-task CUDA_VISIBLE_DEVICES into a
+            # step -- the mpibind SPANK plugin and Slurm's own GPU binding
+            # -- so with them a step's GPU-visibility variable is silently
+            # left unset (the cgroup still confines the devices, but CUDA
+            # code that reads the variable sees nothing).
+            if not scheduler.in_slurm_allocation():
+                scheduler.run_only_args["--mpibind"] = "off"
+                scheduler.run_only_args["--gpu-bind"] = "none"
 
         return
 

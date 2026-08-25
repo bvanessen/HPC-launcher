@@ -80,22 +80,41 @@ class SlurmScheduler(Scheduler):
             # On Sierra family systems srun is a proxy to lrun and lacks this flag
             self.run_only_args["-u"] = None
 
-        if nested_job_step and not self.cpus_per_task and not self.exclusive:
-            # Since Slurm 20.11 a job step is given exclusive use of all CPUs
-            # on the nodes it runs on, so a second concurrent step inside the
-            # same allocation blocks on "Job <id> step creation temporarily
-            # disabled, retrying (Requested nodes are busy)" until the first
-            # finishes. --overlap lets steps share resources, so several
-            # launches can run side by side in one allocation (sizing them so
-            # they do not contend is up to the user; remove the flag with
-            # `-x ~--overlap` to restore exclusive steps).
-            #
-            # Not added when the step's CPU footprint is stated explicitly:
-            # with --cpus-per-task Slurm can pack disjoint concurrent steps
-            # side by side without sharing CPUs (--cpus-per-task implies
-            # --exact), and with --exclusive the user has asked for dedicated
-            # resources -- both are contradicted by --overlap.
-            self.run_only_args["--overlap"] = None
+        # Since Slurm 20.11 a job step is given exclusive use of all CPUs on
+        # the nodes it runs on, so a second concurrent step inside the same
+        # allocation blocks on "Job <id> step creation temporarily disabled,
+        # retrying (Requested nodes are busy)" until the first finishes.
+        # Concurrent steps are enabled in one of two ways, depending on
+        # whether the step's resource footprint was stated:
+        #
+        # - A footprint was given (--cpus-per-task and/or GPUs per task):
+        #   --exact confines the step to exactly the resources it asked for,
+        #   so disjoint concurrent steps pack side by side without sharing.
+        # - No footprint: --overlap lets steps share resources outright
+        #   (sizing them so they do not contend is up to the user; remove
+        #   the flag with `-x ~--overlap` to restore exclusive steps).
+        #
+        # --exclusive means the user asked for dedicated resources, which
+        # both flags would undermine.
+        if nested_job_step and not self.exclusive:
+            if self.cpus_per_task or self.gpus_per_proc > 0:
+                self.run_only_args["--exact"] = None
+                # --exact only confines the *CPUs*; the two implicitly
+                # granted resources still make concurrent steps serialize:
+                #
+                # - Memory: a step with no --mem consumes ALL of the job's
+                #   memory, queueing every later step behind it. --mem=0 is
+                #   the documented remedy: the step may use up to the job's
+                #   memory but does not remove any of it from availability
+                #   to other steps.
+                # - GRES: a step with no GRES request implicitly holds all
+                #   of the job's GPUs, so a CPU-only step would block every
+                #   GPU step. --gres=none makes it hold none.
+                self.run_only_args["--mem"] = "0"
+                if self.gpus_per_proc == 0:
+                    self.run_only_args["--gres"] = "none"
+            else:
+                self.run_only_args["--overlap"] = None
 
         # Number of Nodes
         if nested_job_step:

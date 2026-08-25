@@ -221,11 +221,12 @@ Notes:
 - On SLURM, allocation-selection flags (`--queue`/`--account`/
   `--reservation`) are dropped with a warning for a nested step: those
   properties are fixed by the enclosing allocation.
-- On SLURM, `--overlap` is added to nested steps by default so concurrent
-  launches do not block each other on "step creation temporarily disabled".
-  It is omitted when `-c`/`--cpus-per-task` (steps pack onto disjoint CPUs
-  instead) or `--exclusive` is given, and can be removed with
-  `-x ~--overlap`.
+- On SLURM, nested steps are made concurrency-friendly so launches do not
+  block each other on "step creation temporarily disabled": when a resource
+  footprint is stated (`-c`/`--cpus-per-task` or a per-task GPU count),
+  `--exact` is added so disjoint steps pack side by side; otherwise
+  `--overlap` is added so steps may share resources (removable with
+  `-x ~--overlap`). `--exclusive` suppresses both.
 - Non-blocking (`--bg`) submissions are unaffected: submitting a batch job
   from inside an allocation deliberately creates a new job.
 
