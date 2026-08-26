@@ -32,12 +32,23 @@ NODES=${SLURM_JOB_NUM_NODES:-0}
 [[ "$NODES" == "1" || "$NODES" == "2" ]] || fail "requires a 1- or 2-node allocation (SLURM_JOB_NUM_NODES=${SLURM_JOB_NUM_NODES:-unset})"
 note "allocation $SLURM_JOB_ID ($NODES node(s)) on $(hostname -s)"
 
+# On a CPU-only system (no GPU device nodes on this compute node), keep the
+# same workload shape but request zero GPUs everywhere: the packing,
+# overlap, and CPU-disjointness checks are unchanged, and the GPU checks
+# degrade to "every step holds none".
+GPUS_PRESENT=0
+if compgen -G "/dev/nvidia[0-9]*" > /dev/null || [[ -e /dev/kfd ]]; then
+  GPUS_PRESENT=1
+else
+  note "no GPU device nodes on this node -- running the CPU-only workload"
+fi
+
 # Workload: one "nodes:gpus_per_task:cores_per_task" spec per step.
 if [[ "$NODES" == "1" ]]; then
-  SPECS=( "1:2:8" "1:1:8" "1:1:8"
+  SPECS=( "1:$((2 * GPUS_PRESENT)):8" "1:$GPUS_PRESENT:8" "1:$GPUS_PRESENT:8"
           "1:0:16" "1:0:16" "1:0:16" "1:0:16" )
 else
-  SPECS=( "2:1:8" "1:2:8" "1:1:8"
+  SPECS=( "2:$GPUS_PRESENT:8" "1:$((2 * GPUS_PRESENT)):8" "1:$GPUS_PRESENT:8"
           "2:0:16" "1:0:16" "1:0:16" "1:0:16" "1:0:16" )
 fi
 
