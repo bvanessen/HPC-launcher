@@ -188,6 +188,10 @@ class Scheduler:
     procs_per_node: int
     # GPUs per Process (or task) if any
     gpus_per_proc: int
+    # CPUs per task, if explicitly requested (scheduler default otherwise).
+    # Inside an allocation this also gives a job step an exact CPU footprint,
+    # letting several steps run concurrently without overlapping.
+    cpus_per_task: Optional[int] = None
     # Request exclusive access to the resources
     exclusive: Optional[bool] = None
     # Job name
@@ -626,6 +630,33 @@ class Scheduler:
         """
         raise NotImplementedError
 
+    def ephemeral_identity_wrapper(self) -> list[str]:
+        """Return an optional argv wrapper that announces a live job ID.
+
+        A blocking ephemeral launch has no generated script in which to put
+        scheduler bookkeeping.  Backends that learn their job/step identity
+        only after the parallel launcher starts may return a small wrapper
+        here.  It is inserted between the scheduler command and the user's
+        command; the wrapper must ultimately ``exec \"$@\"`` so the user's
+        argv and signal behavior are preserved.
+
+        The default is appropriate for local and schedulers that do not
+        expose a runtime identity this way.
+        """
+        return []
+
+    @classmethod
+    def cancel_command(cls, identifier: str) -> list[str]:
+        """Return the native command that cancels ``identifier``.
+
+        Scheduler implementations own the syntax for cancelling their jobs
+        or job steps.  Keeping it beside the launch-command definitions avoids
+        duplicating backend knowledge in command-line front ends.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} does not define a cancellation command"
+        )
+
     def launcher_script(
         self,
         system: "System",
@@ -763,13 +794,35 @@ class Scheduler:
         return None
 
     @classmethod
-    def num_nodes_in_allocation(cls) -> tuple[int]:
+    def in_allocation(cls) -> bool:
         """
-        When running under an allocation, check how many nodes are available
+        Is this process already running inside an allocation owned by this
+        scheduler (e.g. a salloc/sbatch, flux alloc, or lalloc/bsub -Is shell)?
 
-        :return: Number of nodes in an allocation
+        A blocking launch from inside an allocation runs as a nested job step
+        rather than requesting a new allocation, and several argument-building
+        decisions key off that. Schedulers that can recognize their allocation
+        from the environment override this; the default, which also serves the
+        local scheduler, is never inside one.
+
+        :return: True if inside an allocation of this scheduler.
         """
-        raise NotImplementedError
+        return False
+
+    @classmethod
+    def num_nodes_in_allocation(cls) -> Optional[int]:
+        """
+        When running inside an allocation of this scheduler (see
+        :meth:`in_allocation`), report how many nodes it holds. Each
+        scheduler consults only its own environment; the scheduler-agnostic
+        ``hpc_launcher.schedulers.num_nodes_in_current_allocation`` asks each
+        scheduler in turn.
+
+        :return: Number of nodes in the allocation, or None when not inside
+                 an allocation of this scheduler (the default, which also
+                 serves the local scheduler).
+        """
+        return None
 
     @classmethod
     def get_parallel_rank_env_variable(cls) -> str:
@@ -1012,7 +1065,7 @@ class Scheduler:
 
         if not use_launch_folder: # Launch job and trace outputs live
             # Run interactive script
-            full_cmdline = cmd + [command]
+            full_cmdline = cmd + self.ephemeral_identity_wrapper() + [command]
 
             for arg in args:
                 full_cmdline += [arg]

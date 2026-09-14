@@ -91,10 +91,16 @@ def configure_launch(
         for unused_field in cli_system_params.keys():
             raise ValueError(f"System Parameters CLI attempt to overwrite unknown field: {unused_field}")
 
-    logger.info(
-        f"Active System Parameters{msg}: {system.active_system_params.prettyprint()}"
-    )
+    if system.active_system_params is not None:
+        logger.info(
+            f"Active System Parameters{msg}: {system.active_system_params.prettyprint()}"
+        )
 
+    # An explicit --gpus-per-proc 0 is a deliberate request for a CPU-only
+    # launch and must survive; only an *unset* value (None from the CLI) may
+    # be defaulted from the system's GPU count below. Capture the
+    # distinction before collapsing None to 0 for the arithmetic.
+    gpus_per_proc_unset = gpus_per_proc is None
     if not gpus_per_proc:
         gpus_per_proc = 0
 
@@ -102,7 +108,7 @@ def configure_launch(
     if system_params is not None:
         if not procs_per_node:
             procs_per_node = system_params.procs_per_node()
-        if gpus_per_proc == 0 and system_params.gpus_per_node > 0:
+        if gpus_per_proc_unset and system_params.gpus_per_node > 0:
             # If gpus_per_proc wasn't set and there are gpus on the node set it to a default of 1
             gpus_per_proc = 1
         if procs_per_node * gpus_per_proc > system_params.gpus_per_node:
@@ -158,7 +164,9 @@ def configure_launch(
             nodes = 1
         if not procs_per_node:
             procs_per_node = 1
-        if not gpus_per_proc:
+        # Same rule as above: only default an *unset* --gpus-per-proc; an
+        # explicit 0 is a CPU-only request.
+        if gpus_per_proc_unset:
             gpus_per_proc = 1
 
     return system, nodes, procs_per_node, gpus_per_proc

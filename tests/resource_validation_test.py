@@ -207,6 +207,55 @@ def test_gpu_per_proc_still_auto_clamped_when_individually_invalid(mock_autodete
 
 
 # ---------------------------------------------------------------------------
+# An explicit --gpus-per-proc 0 is a CPU-only request, not "unset"
+# ---------------------------------------------------------------------------
+@patch(
+    "hpc_launcher.systems.autodetect.autodetect_current_system",
+    return_value=_MockGpuSystem(),
+)
+def test_explicit_zero_gpus_per_proc_survives_on_gpu_system(mock_autodetect):
+    """
+    ``--gpus-per-proc 0`` on a GPU system must stay 0: it is a deliberate
+    CPU-only launch. Previously the CLI's ``None`` (unset) and an explicit
+    ``0`` were conflated (``if not gpus_per_proc``), so the "default to 1
+    when the node has GPUs" rule silently overrode the user's request and
+    the job launched with --gpus-per-task=1.
+    """
+    system, nodes, procs_per_node, gpus_per_proc = configure_launch(
+        None, 2, 1, 0, 0, 0, None
+    )
+    assert gpus_per_proc == 0
+
+
+@patch(
+    "hpc_launcher.systems.autodetect.autodetect_current_system",
+    return_value=_MockGpuSystem(),
+)
+def test_unset_gpus_per_proc_still_defaults_to_one(mock_autodetect):
+    """The unset (None) case keeps its GPU-system default of 1."""
+    system, nodes, procs_per_node, gpus_per_proc = configure_launch(
+        None, 2, 1, None, 0, 0, None
+    )
+    assert gpus_per_proc == 1
+
+
+@patch("hpc_launcher.systems.autodetect.autodetect_current_system")
+def test_explicit_zero_gpus_per_proc_survives_without_system_params(
+    mock_autodetect,
+):
+    """
+    The no-system-params fallback path had the same conflation (``if not
+    gpus_per_proc: gpus_per_proc = 1``).
+    """
+    bare = System("unknown-host")
+    mock_autodetect.return_value = bare
+    system, nodes, procs_per_node, gpus_per_proc = configure_launch(
+        None, 1, 1, 0, 0, 0, None
+    )
+    assert gpus_per_proc == 0
+
+
+# ---------------------------------------------------------------------------
 # --gpumem-at-least must not divide by a zero GPU memory size
 # ---------------------------------------------------------------------------
 @patch(

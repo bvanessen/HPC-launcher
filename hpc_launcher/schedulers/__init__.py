@@ -11,6 +11,33 @@
 # https://github.com/LBANN and https://github.com/LLNL/LBANN.
 #
 # SPDX-License-Identifier: (Apache-2.0)
+from typing import Optional
+
+
+def num_nodes_in_current_allocation() -> Optional[int]:
+    """
+    The node count of the scheduler allocation this process is running
+    inside, or ``None`` when not inside an allocation.
+
+    Unlike ``Scheduler.num_nodes_in_allocation`` this is scheduler-agnostic:
+    it is consulted *before* a scheduler has been selected (CLI argument
+    validation), so it asks every scheduler class in turn rather than
+    assuming one. Each class recognizes only its own allocation
+    (``Scheduler.in_allocation``), so the first that reports a count wins.
+    Flux is asked before Slurm on purpose: a Flux instance started inside a
+    Slurm job is the allocation the user is actually working in.
+
+    :return: Number of nodes in the enclosing allocation, or None.
+    """
+    seen = set()
+    for scheduler in get_schedulers().values():
+        if scheduler in seen:
+            continue
+        seen.add(scheduler)
+        nodes = scheduler.num_nodes_in_allocation()
+        if nodes is not None:
+            return nodes
+    return None
 
 
 def get_schedulers():
@@ -19,6 +46,7 @@ def get_schedulers():
     from .slurm import SlurmScheduler
     from .lsf import LSFScheduler
 
+    # Order matters to num_nodes_in_current_allocation: Flux before Slurm.
     return {
         None: LocalScheduler,
         "local": LocalScheduler,

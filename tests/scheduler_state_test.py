@@ -17,10 +17,17 @@ environment-variable list must be per-instance state, not shared class-level
 state. No torch, no scheduler binaries, no autodetection -- systems are
 constructed directly.
 """
+import pytest
+
 from hpc_launcher.schedulers.flux import FluxScheduler
 from hpc_launcher.schedulers.slurm import SlurmScheduler
 from hpc_launcher.systems.lc.el_capitan_family import ElCapitan
 from hpc_launcher.systems.system import GenericSystem
+
+# These tests assert that allocation-selection flags such as --partition
+# appear on a blocking launch command; inside an existing allocation Slurm
+# deliberately drops them (a nested job step cannot change partition).
+pytestmark = pytest.mark.usefixtures("outside_allocation")
 
 
 def test_scheduler_args_not_shared_between_instances(stub_system):

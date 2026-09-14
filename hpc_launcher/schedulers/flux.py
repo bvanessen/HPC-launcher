@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FluxScheduler(Scheduler):
 
+    @classmethod
+    def in_allocation(cls) -> bool:
+        # FLUX_URI points at the enclosing Flux instance (flux alloc / flux
+        # batch); a `flux run` issued with it set is a nested job.
+        return os.getenv("FLUX_URI") is not None
+
     def build_scheduler_specific_arguments(
         self, system: "System", blocking: bool = True
     ):
@@ -59,6 +65,15 @@ class FluxScheduler(Scheduler):
             # command and shell flags for an allocation
             if not blocking:
                 self.submit_only_args["--gpus-per-slot"] = tmp
+
+        # CPUs (cores) per task. Flux names the flag differently for a task
+        # (flux run) and an allocation (flux batch), like --gpus-per-task
+        # above.
+        if self.cpus_per_task:
+            tmp = f"{self.cpus_per_task}"
+            self.run_only_args["--cores-per-task"] = tmp
+            if not blocking:
+                self.submit_only_args["--cores-per-slot"] = tmp
 
         # Request for node exclusivity
         if self.exclusive:
@@ -99,7 +114,7 @@ class FluxScheduler(Scheduler):
             self.common_launch_args["--job-name"] = f"{self.job_name}"
 
         if self.queue:
-            if os.getenv("FLUX_URI"):
+            if self.in_allocation():
                 logger.warning(
                     f"WARNING: Dropping unsupported option requested when running inside of an allocation: --queue={self.queue}"
                 )
@@ -140,13 +155,32 @@ class FluxScheduler(Scheduler):
     def internal_script_run_command(self) -> str:
         return "flux run "
 
+    def ephemeral_identity_wrapper(self) -> list[str]:
+        """Have rank zero announce the Flux job ID before user code."""
+        return [
+            "/bin/sh",
+            "-c",
+            (
+                'if [ "${FLUX_TASK_RANK:-}" = 0 ] '
+                '&& [ -n "${FLUX_JOB_ID:-}" ]; then '
+                'printf "HPC_LAUNCHER_JOB_ID=%s\\n" "$FLUX_JOB_ID" >&2; '
+                'fi; exec "$@"'
+            ),
+            "hpc-launcher",
+        ]
+
+    @classmethod
+    def cancel_command(cls, identifier: str) -> list[str]:
+        """Return the Flux command that cancels a job."""
+        return ["flux", "cancel", identifier]
+
     def get_job_id(self, output: str) -> Optional[str]:
         # The job ID is the only printout when calling flux batch
         return output.strip()
 
     @classmethod
     def num_nodes_in_allocation(cls) -> Optional[int]:
-        if os.getenv("FLUX_URI"):
+        if cls.in_allocation():
             cmd = ["flux", "resource", "info"]
             proc = subprocess.run(cmd, universal_newlines=True, capture_output=True)
             m = re.search(r"^(\d*) Nodes, (\d*) Cores, (\d*) GPUs$", proc.stdout)
